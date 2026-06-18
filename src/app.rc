@@ -1,0 +1,4 @@
+#include "resource.h"
+
+IDI_APP_ICON ICON "..\\assets\\app.ico"
+IDR_APP_MANIFEST RT_MANIFEST "app.manifest"
