@@ -660,6 +660,20 @@ void RemoveTrayIcon() {
     }
 }
 
+std::wstring CompactAddressLabel(const std::wstring& address) {
+    size_t dot = address.find_last_of(L'.');
+    if (dot != std::wstring::npos && dot + 1 < address.size()) {
+        return address.substr(dot + 1);
+    }
+
+    size_t colon = address.find_last_of(L':');
+    if (colon != std::wstring::npos && colon + 1 < address.size()) {
+        return address.substr(colon + 1);
+    }
+
+    return address;
+}
+
 SIZE CalculateMonitorSize(bool collapsed = false) {
     std::vector<Target> targets;
     {
@@ -674,11 +688,8 @@ SIZE CalculateMonitorSize(bool collapsed = false) {
 
     int rowHeight = (!collapsed && g.showSparklines) ? kSparklineRowHeight : kCompactRowHeight;
     int height = 8 + rows * rowHeight + 8;
-    if (collapsed) {
-        return {36, height};
-    }
 
-    int textWidth = 72;
+    int textWidth = collapsed ? 0 : 72;
     HDC hdc = GetDC(nullptr);
     if (hdc) {
         HGDIOBJ oldFont = nullptr;
@@ -692,8 +703,9 @@ SIZE CalculateMonitorSize(bool collapsed = false) {
             textWidth = size.cx;
         } else {
             for (const auto& target : targets) {
+                std::wstring text = collapsed ? CompactAddressLabel(target.address) : target.address;
                 SIZE size = {};
-                GetTextExtentPoint32W(hdc, target.address.c_str(), static_cast<int>(target.address.size()), &size);
+                GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.size()), &size);
                 if (size.cx > textWidth) {
                     textWidth = size.cx;
                 }
@@ -704,6 +716,17 @@ SIZE CalculateMonitorSize(bool collapsed = false) {
             SelectObject(hdc, oldFont);
         }
         ReleaseDC(nullptr, hdc);
+    }
+
+    if (collapsed) {
+        int width = textWidth + 38;
+        if (width < 56) {
+            width = 56;
+        }
+        if (width > 96) {
+            width = 96;
+        }
+        return {width, height};
     }
 
     int width = textWidth + 48;
@@ -1296,7 +1319,11 @@ void DrawMonitor(HWND hwnd, HDC hdc) {
         DeleteObject(dotPen);
         DeleteObject(dot);
 
-        if (!collapsed) {
+        if (collapsed) {
+            std::wstring compactText = CompactAddressLabel(target.address);
+            RECT textRect = {30, y, client.right - 6, y + 24};
+            DrawTextW(hdc, compactText.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        } else {
             RECT textRect = {34, y, client.right - 10, y + 24};
             DrawTextW(hdc, target.address.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }

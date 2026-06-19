@@ -28,7 +28,7 @@ build\PingMonitor.exe
 
 The settings window is hidden after monitoring starts. The compact monitor window has no title bar or window buttons. It flashes a dot whenever a ping starts, then shows green when online, red when failed, yellow when the recent checks are flapping between online and offline, and gray when monitoring is stopped.
 
-Use the tray icon or compact window right-click menu to show or hide mini ping latency sparklines under each IP. Double-click the compact window to stop monitoring, hide it, and show settings again. Dragging the compact window outside the screen snaps it back to the nearest screen edge; when it is on an edge, it collapses to status dots only. The right-click menu also controls always-on-top, start, stop, and exit.
+Use the tray icon or compact window right-click menu to show or hide mini ping latency sparklines under each IP. Double-click the compact window to stop monitoring, hide it, and show settings again. Dragging the compact window outside the screen snaps it back to the nearest screen edge; when it is on an edge, it collapses to status dots with the last IP segment. The right-click menu also controls always-on-top, start, stop, and exit.
 
 The always-on-top and sparkline visibility settings are saved in the config file.
 
