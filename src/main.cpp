@@ -31,8 +31,8 @@
 namespace {
 
 constexpr wchar_t kAppName[] = L"Ping Monitor";
-constexpr wchar_t kCalVer[] = L"2026.06.18";
-constexpr wchar_t kWindowTitle[] = L"Ping Monitor 2026.06.18 - Powered by nonkr";
+constexpr wchar_t kCalVer[] = L"2026.06.19";
+constexpr wchar_t kWindowTitle[] = L"Ping Monitor 2026.06.19 - Powered by nonkr";
 constexpr wchar_t kSettingsClass[] = L"PingMonitorSettingsWindow";
 constexpr wchar_t kMonitorClass[] = L"PingMonitorCompactWindow";
 
@@ -52,12 +52,21 @@ constexpr int IDM_START = 2002;
 constexpr int IDM_STOP = 2003;
 constexpr int IDM_EXIT = 2004;
 constexpr int IDM_ALWAYS_ON_TOP = 2005;
+constexpr int IDM_SHOW_SPARKLINES = 2006;
 
 constexpr COLORREF kWindowBg = RGB(243, 243, 243);
 constexpr COLORREF kSurfaceBg = RGB(255, 255, 255);
 constexpr COLORREF kBorder = RGB(226, 226, 226);
+constexpr COLORREF kBorderStrong = RGB(198, 198, 198);
 constexpr COLORREF kText = RGB(32, 32, 32);
 constexpr COLORREF kSubtleText = RGB(96, 96, 96);
+constexpr COLORREF kDisabledText = RGB(150, 150, 150);
+constexpr COLORREF kButtonHover = RGB(250, 250, 250);
+constexpr COLORREF kButtonPressed = RGB(236, 236, 236);
+constexpr COLORREF kAccent = RGB(0, 103, 192);
+constexpr COLORREF kAccentHover = RGB(0, 95, 184);
+constexpr COLORREF kAccentPressed = RGB(0, 82, 158);
+constexpr COLORREF kAccentDisabled = RGB(190, 214, 237);
 constexpr COLORREF kGreen = RGB(16, 185, 97);
 constexpr COLORREF kRed = RGB(220, 56, 56);
 constexpr COLORREF kYellow = RGB(232, 176, 36);
@@ -67,6 +76,11 @@ constexpr unsigned int kHistoryMask = 0x3F;
 constexpr int kHistoryWindow = 6;
 constexpr int kFlapAlertTransitions = 2;
 constexpr DWORD kPingFlashMs = 160;
+constexpr int kLatencyHistorySize = 24;
+constexpr int kSparklineHeight = 12;
+constexpr int kSparklineRowHeight = 42;
+constexpr int kCompactRowHeight = 24;
+constexpr int kDragThresholdPx = 8;
 
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
@@ -76,12 +90,23 @@ constexpr DWORD kPingFlashMs = 160;
 #define DWMWCP_ROUND 2
 #endif
 
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+#define DWMWA_SYSTEMBACKDROP_TYPE 38
+#endif
+
+#ifndef DWMSBT_MAINWINDOW
+#define DWMSBT_MAINWINDOW 2
+#endif
+
 struct Target {
     std::wstring address;
     bool online = false;
     bool timeoutAlert = false;
     unsigned int historyBits = 0;
     int historyCount = 0;
+    DWORD latencyHistory[kLatencyHistorySize] = {};
+    int latencyCount = 0;
+    int latencyNext = 0;
     DWORD flashUntil = 0;
     DWORD rtt = 0;
 };
@@ -116,6 +141,18 @@ bool IsFlapping(unsigned int historyBits, int historyCount) {
     return sawOnline && sawOffline && transitions >= kFlapAlertTransitions;
 }
 
+void PushLatencySample(Target* target, DWORD rtt) {
+    if (!target) {
+        return;
+    }
+
+    target->latencyHistory[target->latencyNext] = rtt;
+    target->latencyNext = (target->latencyNext + 1) % kLatencyHistorySize;
+    if (target->latencyCount < kLatencyHistorySize) {
+        ++target->latencyCount;
+    }
+}
+
 struct AppState {
     HINSTANCE instance = nullptr;
     HWND settings = nullptr;
@@ -145,6 +182,12 @@ struct AppState {
     POINT monitorPos = {80, 80};
     bool alwaysOnTop = true;
     bool monitorCollapsed = false;
+    std::atomic_bool menuOpen{false};
+    bool showSparklines = false;
+    bool monitorMouseDown = false;
+    bool monitorDragging = false;
+    POINT mouseDownScreen = {};
+    POINT dragStartPos = {};
 };
 
 AppState g;
@@ -295,6 +338,89 @@ void ApplyRoundedCorners(HWND hwnd) {
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &preference, sizeof(preference));
 }
 
+void ApplyWin11Backdrop(HWND hwnd) {
+    ApplyRoundedCorners(hwnd);
+    const DWORD backdrop = DWMSBT_MAINWINDOW;
+    DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
+}
+
+void FillRoundRect(HDC hdc, RECT rect, int radius, COLORREF fill, COLORREF border) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldBrush = SelectObject(hdc, brush);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+void DrawSettingsBackground(HWND hwnd, HDC hdc) {
+    RECT client = {};
+    GetClientRect(hwnd, &client);
+    FillRect(hdc, &client, g.windowBrush);
+
+    RECT ipPanel = {16, 58, 398, 190};
+    RECT intervalPanel = {116, 198, 204, 228};
+    RECT timeoutPanel = {288, 198, 376, 228};
+    FillRoundRect(hdc, ipPanel, 10, kSurfaceBg, kBorder);
+    FillRoundRect(hdc, intervalPanel, 8, kSurfaceBg, kBorder);
+    FillRoundRect(hdc, timeoutPanel, 8, kSurfaceBg, kBorder);
+}
+
+void DrawOwnerButton(const DRAWITEMSTRUCT* item) {
+    if (!item) {
+        return;
+    }
+
+    bool disabled = (item->itemState & ODS_DISABLED) != 0;
+    bool pressed = (item->itemState & ODS_SELECTED) != 0;
+    bool focused = (item->itemState & ODS_FOCUS) != 0;
+    bool primary = item->CtlID == IDC_START_BUTTON;
+
+    COLORREF fill = kSurfaceBg;
+    COLORREF border = kBorderStrong;
+    COLORREF text = disabled ? kDisabledText : kText;
+
+    if (primary) {
+        fill = disabled ? kAccentDisabled : (pressed ? kAccentPressed : kAccent);
+        border = fill;
+        text = disabled ? RGB(245, 245, 245) : RGB(255, 255, 255);
+    } else if (disabled) {
+        fill = RGB(246, 246, 246);
+        border = kBorder;
+    } else if (pressed) {
+        fill = kButtonPressed;
+    } else if (item->itemState & ODS_HOTLIGHT) {
+        fill = primary ? kAccentHover : kButtonHover;
+    }
+
+    RECT rect = item->rcItem;
+    FillRoundRect(item->hDC, rect, 8, fill, border);
+
+    if (focused && !disabled) {
+        RECT focus = rect;
+        InflateRect(&focus, -4, -4);
+        HPEN focusPen = CreatePen(PS_DOT, 1, primary ? RGB(255, 255, 255) : RGB(80, 80, 80));
+        HGDIOBJ oldPen = SelectObject(item->hDC, focusPen);
+        HGDIOBJ oldBrush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
+        RoundRect(item->hDC, focus.left, focus.top, focus.right, focus.bottom, 6, 6);
+        SelectObject(item->hDC, oldBrush);
+        SelectObject(item->hDC, oldPen);
+        DeleteObject(focusPen);
+    }
+
+    wchar_t textBuffer[32] = {};
+    GetWindowTextW(item->hwndItem, textBuffer, ARRAYSIZE(textBuffer));
+    SetBkMode(item->hDC, TRANSPARENT);
+    SetTextColor(item->hDC, text);
+    if (g.uiFont) {
+        SelectObject(item->hDC, g.uiFont);
+    }
+    DrawTextW(item->hDC, textBuffer, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
 std::string WideToUtf8(const std::wstring& text) {
     if (text.empty()) {
         return {};
@@ -349,6 +475,7 @@ void SaveConfig() {
     data += L"monitorX=" + std::to_wstring(g.monitorPos.x) + L"\n";
     data += L"monitorY=" + std::to_wstring(g.monitorPos.y) + L"\n";
     data += L"alwaysOnTop=" + std::to_wstring(g.alwaysOnTop ? 1 : 0) + L"\n";
+    data += L"showSparklines=" + std::to_wstring(g.showSparklines ? 1 : 0) + L"\n";
     data += L"addressText=" + EscapeConfigValue(addressText) + L"\n";
 
     std::string utf8 = WideToUtf8(data);
@@ -400,6 +527,8 @@ void LoadConfig() {
             g.monitorPos.y = static_cast<LONG>(wcstol(line.c_str() + 9, nullptr, 10));
         } else if (line.rfind(L"alwaysOnTop=", 0) == 0) {
             g.alwaysOnTop = wcstoul(line.c_str() + 12, nullptr, 10) != 0;
+        } else if (line.rfind(L"showSparklines=", 0) == 0) {
+            g.showSparklines = wcstoul(line.c_str() + 15, nullptr, 10) != 0;
         } else if (line.rfind(L"addressText=", 0) == 0) {
             loadedAddressText = UnescapeConfigValue(line.substr(12));
         } else if (line.rfind(L"address=", 0) == 0) {
@@ -484,13 +613,17 @@ void UpdateTrayMenuState(HMENU menu) {
     EnableMenuItem(menu, IDM_START, MF_BYCOMMAND | (g.running ? MF_GRAYED : MF_ENABLED));
     EnableMenuItem(menu, IDM_STOP, MF_BYCOMMAND | (g.running ? MF_ENABLED : MF_GRAYED));
     CheckMenuItem(menu, IDM_ALWAYS_ON_TOP, MF_BYCOMMAND | (g.alwaysOnTop ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(menu, IDM_SHOW_SPARKLINES, MF_BYCOMMAND | (g.showSparklines ? MF_CHECKED : MF_UNCHECKED));
 }
+
+void RefreshMonitorWindow();
 
 void ShowTrayMenu(HWND owner) {
     HMENU menu = CreatePopupMenu();
     const bool settingsVisible = g.settings && IsWindowVisible(g.settings);
     AppendMenuW(menu, MF_STRING, IDM_SHOW_SETTINGS, settingsVisible ? L"隐藏设置" : L"显示设置");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_SHOW_SPARKLINES, L"显示折线图");
     AppendMenuW(menu, MF_STRING, IDM_ALWAYS_ON_TOP, L"置顶显示");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_START, L"开始监控");
@@ -501,9 +634,12 @@ void ShowTrayMenu(HWND owner) {
 
     POINT pt = {};
     GetCursorPos(&pt);
+    g.menuOpen = true;
     SetForegroundWindow(owner);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, owner, nullptr);
+    g.menuOpen = false;
     DestroyMenu(menu);
+    RefreshMonitorWindow();
 }
 
 void AddTrayIcon(HWND owner) {
@@ -536,7 +672,8 @@ SIZE CalculateMonitorSize(bool collapsed = false) {
         rows = 1;
     }
 
-    int height = 8 + rows * 24 + 8;
+    int rowHeight = (!collapsed && g.showSparklines) ? kSparklineRowHeight : kCompactRowHeight;
+    int height = 8 + rows * rowHeight + 8;
     if (collapsed) {
         return {36, height};
     }
@@ -570,6 +707,9 @@ SIZE CalculateMonitorSize(bool collapsed = false) {
     }
 
     int width = textWidth + 48;
+    if (g.showSparklines && width < 168) {
+        width = 168;
+    }
     if (width < 112) {
         width = 112;
     }
@@ -654,7 +794,7 @@ int GetWorkAreaEdgeFlags(const RECT& rect, const RECT& work) {
 }
 
 void PositionMonitorWindow() {
-    if (!g.monitor) {
+    if (!g.monitor || g.menuOpen) {
         return;
     }
 
@@ -695,7 +835,7 @@ void PositionMonitorWindow() {
 }
 
 void RefreshMonitorWindow() {
-    if (g.monitor) {
+    if (g.monitor && !g.menuOpen) {
         PositionMonitorWindow();
         RedrawWindow(g.monitor, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
     }
@@ -745,6 +885,7 @@ void WorkerLoop() {
                         if (result == PingResult::Online) {
                             target.online = true;
                             target.rtt = rtt;
+                            PushLatencySample(&target, rtt);
                         } else {
                             target.online = false;
                             target.rtt = 0;
@@ -849,10 +990,10 @@ void FillSettingsUi() {
 void ShowSettingsWindow() {
     if (!g.settings) {
         g.settings = CreateWindowExW(0, kSettingsClass, kWindowTitle,
-                                    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                                     CW_USEDEFAULT, CW_USEDEFAULT, 430, 335,
                                     nullptr, nullptr, g.instance, nullptr);
-        ApplyRoundedCorners(g.settings);
+        ApplyWin11Backdrop(g.settings);
     }
     FillSettingsUi();
     UpdateButtonState();
@@ -876,6 +1017,12 @@ void ExitApplication() {
 
 void ToggleAlwaysOnTop() {
     g.alwaysOnTop = !g.alwaysOnTop;
+    RefreshMonitorWindow();
+    SaveConfig();
+}
+
+void ToggleSparklines() {
+    g.showSparklines = !g.showSparklines;
     RefreshMonitorWindow();
     SaveConfig();
 }
@@ -905,6 +1052,9 @@ void HandleCommand(HWND hwnd, int id) {
         break;
     case IDM_ALWAYS_ON_TOP:
         ToggleAlwaysOnTop();
+        break;
+    case IDM_SHOW_SPARKLINES:
+        ToggleSparklines();
         break;
     case IDC_HIDE_BUTTON:
         ShowWindow(g.settings, SW_HIDE);
@@ -957,38 +1107,38 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SendMessageW(subtitle, WM_SETFONT, reinterpret_cast<WPARAM>(g.smallFont), TRUE);
 
         HWND label = CreateWindowW(L"STATIC", L"IP 地址", WS_CHILD | WS_VISIBLE,
-                                  22, 44, 180, 22, hwnd, nullptr, g.instance, nullptr);
+                                  22, 42, 180, 22, hwnd, nullptr, g.instance, nullptr);
         SetChildFont(label);
 
-        g.ipEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        g.ipEdit = CreateWindowExW(0, L"EDIT", L"",
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
-                                  22, 68, 372, 118, hwnd, ControlId(IDC_IP_EDIT), g.instance, nullptr);
+                                  26, 66, 364, 116, hwnd, ControlId(IDC_IP_EDIT), g.instance, nullptr);
         SetControlTheme(g.ipEdit);
         g.ipEditProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g.ipEdit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(IpEditProc)));
 
         label = CreateWindowW(L"STATIC", L"检测间隔 ms", WS_CHILD | WS_VISIBLE,
                               22, 204, 100, 22, hwnd, nullptr, g.instance, nullptr);
         SetChildFont(label);
-        g.intervalEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1000",
+        g.intervalEdit = CreateWindowExW(0, L"EDIT", L"1000",
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
-                                        122, 200, 82, 28, hwnd, ControlId(IDC_INTERVAL_EDIT), g.instance, nullptr);
+                                        124, 203, 76, 22, hwnd, ControlId(IDC_INTERVAL_EDIT), g.instance, nullptr);
         SetControlTheme(g.intervalEdit);
 
         label = CreateWindowW(L"STATIC", L"超时 ms", WS_CHILD | WS_VISIBLE,
                               226, 204, 70, 22, hwnd, nullptr, g.instance, nullptr);
         SetChildFont(label);
-        g.timeoutEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"2000",
+        g.timeoutEdit = CreateWindowExW(0, L"EDIT", L"2000",
                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
-                                       294, 200, 82, 28, hwnd, ControlId(IDC_TIMEOUT_EDIT), g.instance, nullptr);
+                                       296, 203, 76, 22, hwnd, ControlId(IDC_TIMEOUT_EDIT), g.instance, nullptr);
         SetControlTheme(g.timeoutEdit);
 
-        g.startButton = CreateWindowW(L"BUTTON", L"开始", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        g.startButton = CreateWindowW(L"BUTTON", L"开始", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                       154, 248, 72, 30, hwnd, ControlId(IDC_START_BUTTON), g.instance, nullptr);
         SetControlTheme(g.startButton);
-        g.stopButton = CreateWindowW(L"BUTTON", L"停止", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        g.stopButton = CreateWindowW(L"BUTTON", L"停止", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                      236, 248, 70, 30, hwnd, ControlId(IDC_STOP_BUTTON), g.instance, nullptr);
         SetControlTheme(g.stopButton);
-        g.hideButton = CreateWindowW(L"BUTTON", L"隐藏", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        g.hideButton = CreateWindowW(L"BUTTON", L"隐藏", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                      316, 248, 72, 30, hwnd, ControlId(IDC_HIDE_BUTTON), g.instance, nullptr);
         SetControlTheme(g.hideButton);
 
@@ -997,6 +1147,18 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         AddTrayIcon(hwnd);
         break;
     }
+    case WM_PAINT: {
+        PAINTSTRUCT ps = {};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        DrawSettingsBackground(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DRAWITEM:
+        DrawOwnerButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
+        return TRUE;
     case WM_CTLCOLORSTATIC: {
         HDC hdc = reinterpret_cast<HDC>(wParam);
         SetBkMode(hdc, TRANSPARENT);
@@ -1032,6 +1194,47 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     return 0;
+}
+
+void DrawLatencySparkline(HDC hdc, const Target& target, RECT rect) {
+    HPEN basePen = CreatePen(PS_SOLID, 1, RGB(225, 225, 225));
+    HGDIOBJ oldPen = SelectObject(hdc, basePen);
+    MoveToEx(hdc, rect.left, rect.bottom - 1, nullptr);
+    LineTo(hdc, rect.right, rect.bottom - 1);
+    SelectObject(hdc, oldPen);
+    DeleteObject(basePen);
+
+    if (target.latencyCount < 2) {
+        return;
+    }
+
+    DWORD maxRtt = 1;
+    DWORD samples[kLatencyHistorySize] = {};
+    for (int i = 0; i < target.latencyCount; ++i) {
+        int source = (target.latencyNext - target.latencyCount + i + kLatencyHistorySize) % kLatencyHistorySize;
+        samples[i] = target.latencyHistory[source];
+        if (samples[i] > maxRtt) {
+            maxRtt = samples[i];
+        }
+    }
+
+    POINT points[kLatencyHistorySize] = {};
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+    for (int i = 0; i < target.latencyCount; ++i) {
+        int x = rect.left + (target.latencyCount == 1 ? 0 : (width * i) / (target.latencyCount - 1));
+        int y = rect.bottom - 1 - static_cast<int>((static_cast<unsigned long long>(samples[i]) * (height - 2)) / maxRtt);
+        if (y < rect.top) {
+            y = rect.top;
+        }
+        points[i] = {x, y};
+    }
+
+    HPEN linePen = CreatePen(PS_SOLID, 1, kAccent);
+    oldPen = SelectObject(hdc, linePen);
+    Polyline(hdc, points, target.latencyCount);
+    SelectObject(hdc, oldPen);
+    DeleteObject(linePen);
 }
 
 void DrawMonitor(HWND hwnd, HDC hdc) {
@@ -1073,6 +1276,8 @@ void DrawMonitor(HWND hwnd, HDC hdc) {
     int y = 8;
     const bool running = g.running.load();
     const bool collapsed = g.monitorCollapsed;
+    const bool showSparklines = g.showSparklines && !collapsed;
+    const int rowHeight = showSparklines ? kSparklineRowHeight : kCompactRowHeight;
     const DWORD now = GetTickCount();
     for (const auto& target : targets) {
         COLORREF color = kGray;
@@ -1095,7 +1300,11 @@ void DrawMonitor(HWND hwnd, HDC hdc) {
             RECT textRect = {34, y, client.right - 10, y + 24};
             DrawTextW(hdc, target.address.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
-        y += 24;
+        if (showSparklines) {
+            RECT graphRect = {34, y + 25, client.right - 12, y + 25 + kSparklineHeight};
+            DrawLatencySparkline(hdc, target, graphRect);
+        }
+        y += rowHeight;
     }
 }
 
@@ -1132,6 +1341,9 @@ LRESULT CALLBACK MonitorProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_ERASEBKGND:
         return 1;
     case WM_PING_UPDATED:
+        if (g.menuOpen || g.monitorDragging || g.monitorMouseDown) {
+            return 0;
+        }
         PositionMonitorWindow();
         RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
         SetTimer(hwnd, TIMER_REPAINT, kPingFlashMs, nullptr);
@@ -1145,17 +1357,63 @@ LRESULT CALLBACK MonitorProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_LBUTTONDBLCLK:
         StopMonitorAndShowSettings();
         return 0;
-    case WM_LBUTTONDOWN:
-        ReleaseCapture();
-        SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    case WM_LBUTTONDOWN: {
+        SetCapture(hwnd);
+        g.monitorMouseDown = true;
+        g.monitorDragging = false;
+        GetCursorPos(&g.mouseDownScreen);
+        g.dragStartPos = g.monitorPos;
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        if (g.monitorMouseDown && (wParam & MK_LBUTTON)) {
+            POINT current = {};
+            GetCursorPos(&current);
+            int dx = current.x - g.mouseDownScreen.x;
+            int dy = current.y - g.mouseDownScreen.y;
+            if (!g.monitorDragging && (abs(dx) > kDragThresholdPx || abs(dy) > kDragThresholdPx)) {
+                g.monitorDragging = true;
+            }
+            if (g.monitorDragging) {
+                RECT currentRect = {};
+                GetWindowRect(hwnd, &currentRect);
+                int width = currentRect.right - currentRect.left;
+                int height = currentRect.bottom - currentRect.top;
+                RECT target = {
+                    g.dragStartPos.x + dx,
+                    g.dragStartPos.y + dy,
+                    g.dragStartPos.x + dx + width,
+                    g.dragStartPos.y + dy + height
+                };
+                ClampRectToWorkArea(&target);
+                g.monitorPos = {target.left, target.top};
+                HWND insertAfter = g.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST;
+                SetWindowPos(hwnd, insertAfter, target.left, target.top, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOREDRAW);
+            }
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (g.monitorMouseDown) {
+            bool wasDragging = g.monitorDragging;
+            g.monitorMouseDown = false;
+            g.monitorDragging = false;
+            ReleaseCapture();
+            if (wasDragging) {
+                PositionMonitorWindow();
+                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+                SaveConfig();
+            }
+        }
+        return 0;
+    case WM_CAPTURECHANGED:
+        g.monitorMouseDown = false;
+        g.monitorDragging = false;
         return 0;
     case WM_MOVING: {
         RECT* rect = reinterpret_cast<RECT*>(lParam);
         ClampRectToWorkArea(rect);
         if (rect) {
             g.monitorPos = {rect->left, rect->top};
-            RECT work = GetNearestWorkArea(*rect);
-            g.monitorCollapsed = GetWorkAreaEdgeFlags(*rect, work) != 0;
         }
         return TRUE;
     }
@@ -1187,7 +1445,7 @@ void CreateUiFont() {
     LOGFONTW lf = {};
     lf.lfHeight = -16;
     lf.lfWeight = FW_NORMAL;
-    wcscpy_s(lf.lfFaceName, L"Segoe UI");
+    wcscpy_s(lf.lfFaceName, L"Segoe UI Variable Text");
     g.uiFont = CreateFontIndirectW(&lf);
 
     lf.lfHeight = -14;

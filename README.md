@@ -1,8 +1,8 @@
-# Ping Monitor 2026.06.18
+# Ping Monitor 2026.06.19
 
 Win11 minimal ping status monitor. It is a native Win32 C++ program that builds into a single portable `.exe` and uses only Windows system APIs.
 
-The executable includes an embedded app icon, a Common Controls v6 manifest, and light Win11-style spacing, fonts, and rounded windows. The window title includes `Powered by nonkr`.
+The executable includes an embedded app icon, a Common Controls v6 manifest, Win11-style spacing, rounded input surfaces, owner-drawn buttons, and rounded windows. The window title includes `Powered by nonkr`.
 
 ## Build
 
@@ -28,7 +28,9 @@ build\PingMonitor.exe
 
 The settings window is hidden after monitoring starts. The compact monitor window has no title bar or window buttons. It flashes a dot whenever a ping starts, then shows green when online, red when failed, yellow when the recent checks are flapping between online and offline, and gray when monitoring is stopped.
 
-Double-click the compact monitor window to stop monitoring, hide the compact window, and show settings again. Dragging the compact window outside the screen snaps it back to the nearest screen edge; when it is on an edge, it collapses to status dots only. Use the tray icon or compact window right-click menu to show settings, toggle always-on-top, start, stop, or exit.
+Use the tray icon or compact window right-click menu to show or hide mini ping latency sparklines under each IP. Double-click the compact window to stop monitoring, hide it, and show settings again. Dragging the compact window outside the screen snaps it back to the nearest screen edge; when it is on an edge, it collapses to status dots only. The right-click menu also controls always-on-top, start, stop, and exit.
+
+The always-on-top and sparkline visibility settings are saved in the config file.
 
 Configuration is stored under:
 
