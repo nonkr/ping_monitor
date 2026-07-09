@@ -1,4 +1,4 @@
-# Ping Monitor 2026.06.19
+# Ping Monitor 2026.07.09
 
 Win11 minimal ping status monitor. It is a native Win32 C++ program that builds into a single portable `.exe` and uses only Windows system APIs.
 

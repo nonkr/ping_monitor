@@ -31,8 +31,8 @@
 namespace {
 
 constexpr wchar_t kAppName[] = L"Ping Monitor";
-constexpr wchar_t kCalVer[] = L"2026.06.19";
-constexpr wchar_t kWindowTitle[] = L"Ping Monitor 2026.06.19 - Powered by nonkr";
+constexpr wchar_t kCalVer[] = L"2026.07.09";
+constexpr wchar_t kWindowTitle[] = L"Ping Monitor 2026.07.09 - Powered by nonkr";
 constexpr wchar_t kSettingsClass[] = L"PingMonitorSettingsWindow";
 constexpr wchar_t kMonitorClass[] = L"PingMonitorCompactWindow";
 
