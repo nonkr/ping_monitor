@@ -100,6 +100,7 @@ constexpr int kDragThresholdPx = 8;
 
 struct Target {
     std::wstring address;
+    std::wstring comment;
     bool online = false;
     bool timeoutAlert = false;
     unsigned int historyBits = 0;
@@ -110,6 +111,13 @@ struct Target {
     DWORD flashUntil = 0;
     DWORD rtt = 0;
 };
+
+Target MakeTarget(const std::wstring& address, const std::wstring& comment = {}) {
+    Target target;
+    target.address = address;
+    target.comment = comment;
+    return target;
+}
 
 enum class PingResult {
     Online,
@@ -204,30 +212,21 @@ std::wstring Trim(const std::wstring& text) {
     return text.substr(first, last - first);
 }
 
-std::vector<std::wstring> SplitAddresses(const std::wstring& text) {
-    std::vector<std::wstring> addresses;
+void AddTargetsFromLine(const std::wstring& line, std::vector<Target>* targets) {
+    if (!targets) {
+        return;
+    }
+
+    size_t commentStart = line.find(L'#');
+    std::wstring body = commentStart == std::wstring::npos ? line : line.substr(0, commentStart);
+    std::wstring comment = commentStart == std::wstring::npos ? std::wstring() : Trim(line.substr(commentStart + 1));
     std::wstring current;
-    bool inComment = false;
 
-    for (wchar_t ch : text) {
-        if (ch == L'#') {
-            inComment = true;
-            continue;
-        }
-
-        if (ch == L'\r' || ch == L'\n') {
+    for (wchar_t ch : body) {
+        if (ch == L',' || ch == L';') {
             current = Trim(current);
             if (!current.empty()) {
-                addresses.push_back(current);
-            }
-            current.clear();
-            inComment = false;
-        } else if (inComment) {
-            continue;
-        } else if (ch == L',' || ch == L';') {
-            current = Trim(current);
-            if (!current.empty()) {
-                addresses.push_back(current);
+                targets->push_back(MakeTarget(current, comment));
             }
             current.clear();
         } else {
@@ -237,9 +236,27 @@ std::vector<std::wstring> SplitAddresses(const std::wstring& text) {
 
     current = Trim(current);
     if (!current.empty()) {
-        addresses.push_back(current);
+        targets->push_back(MakeTarget(current, comment));
     }
-    return addresses;
+}
+
+std::vector<Target> SplitTargets(const std::wstring& text) {
+    std::vector<Target> targets;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find_first_of(L"\r\n", start);
+        std::wstring line = text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+        AddTargetsFromLine(line, &targets);
+
+        if (end == std::wstring::npos) {
+            break;
+        }
+        start = end + 1;
+        if (text[end] == L'\r' && start < text.size() && text[start] == L'\n') {
+            ++start;
+        }
+    }
+    return targets;
 }
 
 std::wstring JoinAddresses(const std::vector<Target>& targets) {
@@ -249,6 +266,10 @@ std::wstring JoinAddresses(const std::vector<Target>& targets) {
             text += L"\r\n";
         }
         text += target.address;
+        if (!target.comment.empty()) {
+            text += L" # ";
+            text += target.comment;
+        }
     }
     return text;
 }
@@ -545,13 +566,10 @@ void LoadConfig() {
     }
 
     if (!loadedAddressText.empty()) {
-        auto parsed = SplitAddresses(loadedAddressText);
-        for (const auto& address : parsed) {
-            loadedTargets.push_back({address});
-        }
+        loadedTargets = SplitTargets(loadedAddressText);
     } else {
         for (const auto& address : legacyAddresses) {
-            loadedTargets.push_back({address});
+            loadedTargets.push_back(MakeTarget(address));
             if (!loadedAddressText.empty()) {
                 loadedAddressText += L"\r\n";
             }
@@ -674,6 +692,14 @@ std::wstring CompactAddressLabel(const std::wstring& address) {
     return address;
 }
 
+std::wstring TargetDisplayLabel(const Target& target) {
+    if (target.comment.empty()) {
+        return target.address;
+    }
+
+    return target.address + L" # " + target.comment;
+}
+
 SIZE CalculateMonitorSize(bool collapsed = false) {
     std::vector<Target> targets;
     {
@@ -703,7 +729,7 @@ SIZE CalculateMonitorSize(bool collapsed = false) {
             textWidth = size.cx;
         } else {
             for (const auto& target : targets) {
-                std::wstring text = collapsed ? CompactAddressLabel(target.address) : target.address;
+                std::wstring text = collapsed ? CompactAddressLabel(target.address) : TargetDisplayLabel(target);
                 SIZE size = {};
                 GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.size()), &size);
                 if (size.cx > textWidth) {
@@ -967,8 +993,8 @@ void StartMonitoring() {
 
 bool ApplySettingsFromUi() {
     std::wstring text = GetWindowTextString(g.ipEdit);
-    auto addresses = SplitAddresses(text);
-    if (addresses.empty()) {
+    auto targets = SplitTargets(text);
+    if (targets.empty()) {
         MessageBoxW(g.settings, L"请至少输入一个 IPv4 地址。", kAppName, MB_OK | MB_ICONINFORMATION);
         return false;
     }
@@ -978,10 +1004,7 @@ bool ApplySettingsFromUi() {
 
     {
         std::lock_guard<std::mutex> lock(g.mutex);
-        g.targets.clear();
-        for (const auto& address : addresses) {
-            g.targets.push_back({address});
-        }
+        g.targets = targets;
         g.addressText = text;
     }
     g.intervalMs = intervalMs;
@@ -1325,7 +1348,8 @@ void DrawMonitor(HWND hwnd, HDC hdc) {
             DrawTextW(hdc, compactText.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         } else {
             RECT textRect = {34, y, client.right - 10, y + 24};
-            DrawTextW(hdc, target.address.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            std::wstring displayText = TargetDisplayLabel(target);
+            DrawTextW(hdc, displayText.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
         if (showSparklines) {
             RECT graphRect = {34, y + 25, client.right - 12, y + 25 + kSparklineHeight};
